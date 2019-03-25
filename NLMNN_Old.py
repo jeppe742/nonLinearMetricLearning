@@ -29,6 +29,41 @@ class NLMNN():
         self.max_iter = max_iter
         self.tol = tol
 
+    def get_target_neighbours(self, X, y, k=5):
+        '''
+        Get the k closest neighbours to each point in the dataset, for each label
+
+        Arg:
+            X ([n, d] matrix): Input data, where n in the number of points and d is the dimension
+            y ([n] array): The class label for each datapoint
+            k (int): number of neighbours for each datapoint
+
+        Returns:
+            target_neighbours ([n, k, num_classes]): index [i,j,k] has the jth neighbour of datapoint i, with label k 
+
+        '''
+        n, d = X.shape
+        num_classes = len(np.unique(y))
+
+        target_neighbours = np.zeros((n, k, num_classes))
+
+        # calculate pairwise distance
+        pairwise_distance = pairwise_distances(X, X)
+
+        # Fill diagonal with infinity, since we want to ignore these
+        np.fill_diagonal(pairwise_distance, float("inf"))
+
+        for label in range(num_classes):
+            pd_tmp = pairwise_distance.copy()
+            # Set all entries from different label to infinity
+            pd_tmp[y != label, :] = float("inf")
+
+            # Sort entries and pick first 5
+            idx = np.argpartition(pd_tmp, k)[:, 0:5]
+
+            target_neighbours[label, :, :] = idx
+        return target_neighbours
+
     def fit(self, x, y, A_init=None):
         n, d = x.shape
 
@@ -39,6 +74,8 @@ class NLMNN():
             self.A = 10 * np.eye(d) + 0.01 * np.ones((d, d))
 
         distance = self.get_metric()
+
+        target_neighbours = self.get_target_neighbours(x, y)
 
         for i in range(self.max_iter):
 
