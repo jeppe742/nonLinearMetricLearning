@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.special import softmax
+from sklearn.metrics import pairwise_distances
 
 def chi2_distance(x_i, x_j):
     d = x_i.shape
@@ -29,29 +30,28 @@ class NLMNN():
             target_neighbours ([n, k, num_classes]): index [i,j,k] has the jth neighbour of datapoint i, with label k 
 
         '''
+
+        y = y.reshape(-1,1)
+
         n, d = X.shape
-        num_classes = len(np.unique(y))
 
-        target_neighbours = np.zeros((n, k, num_classes))
-
-        # calculate pairwise distance
+        # Calculate pairwise distance
         pairwise_distance = pairwise_distances(X, X)
 
         # Fill diagonal with infinity, since we want to ignore these
         np.fill_diagonal(pairwise_distance, float("inf"))
 
-        for label in range(num_classes):
-            pd_tmp = pairwise_distance.copy()
+        #for label in range(num_classes):
+        pd_tmp = pairwise_distance.copy()
             # Set all entries from different label to infinity
-            pd_tmp[y != label, :] = float("inf")
+        pd_tmp[y != y.T] = float("inf")
 
-            # Sort entries and pick first 5
-            idx = np.argpartition(pd_tmp, k)[:, 0:5]
+            # Sort entries and pick first k
+        target_neighbours = np.argpartition(pd_tmp, k)[:, 0:k]
 
-            target_neighbours[label, :, :] = idx
         return target_neighbours
 
-    def get_imposters(X, y):
+    def get_imposters(self, X, y):
         '''
         Get the imposters for each datapoint, defined as points classified wrongly as the same class as the datapoint
 
@@ -86,7 +86,7 @@ class NLMNN():
         return imposters
 
 
-    def get_grad(X):
+    def get_grad(self, X):
         '''
         Calculate the gradient for a given iteration
 
@@ -95,16 +95,30 @@ class NLMNN():
         Returns:
             dL_dA ([d,d] matrix): gradient of loss function with respect to each entry in the A matrix
         '''
-
+        n, d = X.shape
         L = self.get_L()
         t = self.get_t(X)
+        imposters = self.get_imposters(X,y)
 
         def dChi2_dA(i,j,p,q):
-            return L[p,q]*( (t[i,j,p] * ( X[i,q] - x[j,q] ) - t[i,j,p]**2*(x[i,q] + x[j,q])/2 ) \
-                    - sum(L[:,q] * (t[i,k,:] * (x[i,q] - x[j,q]) - t[i,j,:]**2*(x[i,q] + x[j,q])/2 )) )
-
-
-    def get_t(X):
+            return L[p,q]*( (t[i,j,p] * ( X[i,q] - X[j,q] ) - t[i,j,p]**2*(X[i,q] + X[j,q])/2 ) \
+                    - sum(L[:,q] * (t[i,j,:] * (X[i,q] - X[j,q]) - t[i,j,:]**2*(X[i,q] + X[j,q])/2 )) )
+        #TODO calculate loss function value?
+        grad = np.zeros((d,d))
+        #return grad
+        for p in range(d):
+            for q in range(d):
+                
+                for i in range(n):
+                    for j in self.target_neighbours[i]:
+                    #Pull step
+                        grad[p,q] += dChi2_dA(i,j,p,q)
+                    
+                        #Push step
+                        for k in imposters[i]:
+                            grad[p,q] += self.mu * ( dChi2_dA(i,j,p,q) - dChi2_dA(i,k,p,q))
+        return grad
+    def get_t(self, X):
         '''
         Calculate t as defined in Yang et al.
 
@@ -128,7 +142,7 @@ class NLMNN():
         t = x_bar_diff/x_bar_add
         return t
     
-    def get_L():
+    def get_L(self):
         return softmax(self.A,axis=0)
 
     def fit(self, x, y, A_init=None):
@@ -140,15 +154,15 @@ class NLMNN():
         else:
             self.A = 10 * np.eye(d) + 0.01 * np.ones((d, d))
 
-        distance = self.get_metric()
+        distance = self.metric
 
-        target_neighbours = self.get_target_neighbours(x, y)
+        self.target_neighbours = self.get_target_neighbours(x, y)
 
         for i in range(self.max_iter):
-            grad = self.get_grad()
+            grad = self.get_grad(X)
             self.A -= self.lr*grad
 
-    def metric(x, y):
+    def metric(self, x, y):
         L = self.get_L()
         dist = chi2_distance(x.dot(L), y.dot(L))
         return dist
@@ -161,5 +175,6 @@ if __name__ == '__main__':
     X = iris.data
     y = iris.target
 
-    lnmnn = NLMNN()
-    lnmnn.fit(X, y)
+    nlmnn = NLMNN()
+    nlmnn.get_target_neighbours(X,y)
+    nlmnn.fit(X, y)
