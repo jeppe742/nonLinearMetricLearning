@@ -2,56 +2,89 @@ import numpy as np
 from scipy.special import softmax
 from sklearn.metrics import pairwise_distances
 from tqdm import tqdm
-#from numba import jit
+from numba import jit, njit, prange
 
 
 def chi2_distance(x_i, x_j):
-    return 0.5*sum(((x_i - x_j)**2)/(x_i+x_j))
+    return 0.5*sum(((x_i - x_j)**2)/(x_i+x_j+1e-18))
 
 
-# @jit(nopython=True)
-# def dChi2_dA(i, j, p, q, L, t):
-#     d,_ = L.shape
-#     result= ((t[i, j, p] * (X[i, q] - X[j, q]) - t[i, j, p]**2*(X[i, q] + X[j, q])/2))
+@jit(nopython=True)
+def dChi2_dA(i, j, p, q, L, t):
+    d, _ = L.shape
+    result = ((t[i, j, p] * (X[i, q] - X[j, q]) - t[i, j, p]**2*(X[i, q] + X[j, q])/2))
 
-#     for l in range(d):
-#         result -=(L[l, q] * (t[i, j, l] * (X[i, q] - X[j, q]) - t[i, j, l]**2*(X[i, q] + X[j, q])/2))
+    for l in range(d):
+        result -= (L[l, q] * (t[i, j, l] * (X[i, q] - X[j, q]) - t[i, j, l]**2*(X[i, q] + X[j, q])/2))
 
-#     return L[p, q]*result
+    return L[p, q]*result
 
-# @jit(nopython=True)
-# def _get_grad(X, t, L, target_neighbours, imposters, mu):
-#     '''
-#     Calculate the gradient for a given iteration
 
-#     Args:
-#         X ([n,d] matrix): input data
-#     Returns:
-#         dL_dA ([d,d] matrix): gradient of loss function with respect to each entry in the A matrix
-#     '''
-#     n= 150
-#     d=2
-#     #d=1
-#     t = t
+@jit(nopython=True)
+def _metric(x, y, L):
+    x = x.dot(L)
+    y = y.dot(L)
+    tmp = 0.0
+    for i in range(len(x)):
+        tmp += ((x[i] - y[i])**2)/(x[i] + y[i] + 1e-18)
+    return 0.5*tmp
+    #dist = _chi2_distance(x.dot(L), y.dot(L))
+    # return dist
 
-#     grad = np.zeros((d, d))
-#     # return grad
-#     for p in range(d):
-#         for q in range(d):
-#             #print(f"{p},{q}")
-#             for i in range(n):
-#                 for imp, j in enumerate(target_neighbours[i]):
-#                     # Pull step
-#                     grad[p, q] += dChi2_dA(i, j, p, q, L, t)
 
-#                     # Push step
-#                     for k in imposters[i,imp]:
-#                         grad[p, q] += mu * (dChi2_dA(i, j, p, q, L, t) - dChi2_dA(i, k, p, q, L, t))
-#     return grad
+@njit()
+def _get_grad(X, t, L, target_neighbours, imposters, mu):
+    '''
+    Calculate the gradient for a given iteration
+
+    Args:
+        X ([n,d] matrix): input data
+    Returns:
+        dL_dA ([d,d] matrix): gradient of loss function with respect to each entry in the A matrix
+    '''
+    n, d = X.shape
+
+    grad = np.zeros((d, d))
+
+    for p in range(d):
+        for q in range(d):
+
+            for i in range(n):
+                for imp, j in enumerate(target_neighbours[i]):
+                    # Pull step
+                    grad[p, q] += dChi2_dA(i, j, p, q, L, t)
+
+                    # Push step
+                    for k in imposters[i, imp]:
+                        if k >= 0:
+                            grad[p, q] += mu * (dChi2_dA(i, j, p, q, L, t) - dChi2_dA(i, k, p, q, L, t))
+    return grad
+
+
+@njit()
+def _get_loss(X, target_neighbours, imposters, L, mu, l):
+    '''
+    Calculate the loss, given the current L matrix
+
+    Args:
+        X ([n,d] matrix): input data
+    Returns:
+        loss (float): Loss value
+    '''
+    n, d = X.shape
+    loss = 0
+    for i in range(n):
+        for imp, j in enumerate(target_neighbours[i]):
+            loss += _metric(X[i], X[j], L)
+
+            for k in imposters[i, imp]:
+                if k >= 0:
+                    loss += mu * (l + _metric(X[i], X[j], L) - _metric(X[i], X[k], L))
+    return loss
 
 
 class NLMNN():
-    def __init__(self, l=0, mu=1, lr=100, max_iter=2000, tol=1e-9, k=3, max_lr_reductions=50):
+    def __init__(self, l=0.1, mu=1, lr=1, max_iter=200, tol=1e-9, k=3, max_lr_reductions=50, jit=True):
         self.l = l
         self.mu = mu
         self.max_iter = max_iter
@@ -62,6 +95,7 @@ class NLMNN():
         self.losses = []
         self.num_imposters = []
         self.max_lr_reductions = max_lr_reductions
+        self.jit = jit
 
     def get_target_neighbours(self, X, y):
         '''
@@ -125,8 +159,17 @@ class NLMNN():
                     if pairwise_distance[i, k] <= pairwise_distance[i, j] + self.l and y[i] != y[k]:
                         imposters[i][neighbour_idx].append(k)
 
-        return np.array(imposters)
-    
+        # Convert to padded numpy array. This might use unnessecary memory for large datasets
+        max_num_imposters = len(max(max(imposters, key=len), key=len))
+
+        imposters_np = np.ones((n, self.k, max_num_imposters), dtype=np.int)*-1
+
+        for i in range(n):
+            for j in range(self.k):
+                imposters_np[i, j, 0:len(imposters[i][j])] = imposters[i][j]
+
+        return imposters_np
+
     def get_grad_approx(self, X, y, delta=0.001):
         '''
         Calculate the gradient for a given iteration
@@ -139,33 +182,31 @@ class NLMNN():
 
         n, d = X.shape
 
-
         grad = np.zeros((d, d))
 
         A_tmp = self.A.copy()
         f_tmp = self.get_loss(X)
         L_tmp = self.L.copy()
         imposters_tmp = self.imposters.copy()
-        #Calculate the gradient for each index in A
+        # Calculate the gradient for each index in A
         for p in range(d):
             for q in range(d):
 
-                #add a small permutation to A, and update all dependent variables 
-                self.A[p,q] += delta
+                # add a small permutation to A, and update all dependent variables
+                self.A[p, q] += delta
                 self.L = self.calculate_L()
                 self.imposters = self.get_imposters(X, y)
-                #calculate permuted loss
+                # calculate permuted loss
                 f_delta = self.get_loss(X)
-                #approximate gradient by finite difference
-                grad[p,q] = (f_delta-f_tmp)/delta
+                # approximate gradient by finite difference
+                grad[p, q] = (f_delta-f_tmp)/delta
 
-                #reset variables
+                # reset variables
                 self.A = A_tmp
                 self.L = L_tmp
                 self.imposters = imposters_tmp
         return grad
 
-    
     def get_grad(self, X):
         '''
         Calculate the gradient for a given iteration
@@ -180,7 +221,11 @@ class NLMNN():
 
         t = self.t
 
-        #Define partial derivative function for chainrule calculation
+        if self.jit:
+            return _get_grad(X, t, self.L, self.target_neighbours, self.imposters, self.mu)
+
+        # Define partial derivative function for chainrule calculation
+
         def dChi2_dA(i, j, p, q):
             return self.L[p, q]*(
                 (t[i, j, p] * (X[i, q] - X[j, q]) - t[i, j, p]**2*(X[i, q] + X[j, q])/2)
@@ -189,19 +234,20 @@ class NLMNN():
 
         grad = np.zeros((d, d))
 
-        #Calculate the gradient for each index in A
+        # Calculate the gradient for each index in A
         for p in range(d):
             for q in range(d):
-                #Loop over all datapoints
+                # Loop over all datapoints
                 for i in range(n):
-                    #Loop over all target neighbours, and their corresponding imposters
-                    for j, imposters in zip(self.target_neighbours[i],self.imposters[i]):
+                    # Loop over all target neighbours, and their corresponding imposters
+                    for j, imposters in zip(self.target_neighbours[i], self.imposters[i]):
                         # Pull step
                         grad[p, q] += dChi2_dA(i, j, p, q)
 
                         # Push step
                         for k in imposters:
-                            grad[p, q] += self.mu * (dChi2_dA(i, j, p, q) - dChi2_dA(i, k, p, q))
+                            if k >= 0:
+                                grad[p, q] += self.mu * (dChi2_dA(i, j, p, q) - dChi2_dA(i, k, p, q))
         return grad
 
     def get_loss(self, X):
@@ -213,6 +259,9 @@ class NLMNN():
         Returns:
             loss (float): Loss value
         '''
+        if self.jit:
+            return _get_loss(X, self.target_neighbours, self.imposters, self.L, self.mu, self.l)
+
         n, d = X.shape
         loss = 0
         for i in range(n):
@@ -220,7 +269,8 @@ class NLMNN():
                 loss += self.metric(X[i], X[j])
 
                 for k in imposters:
-                    loss += self.mu * (self.l + self.metric(X[i], X[j]) - self.metric(X[i], X[k]))
+                    if k >= 0:
+                        loss += self.mu * (self.l + self.metric(X[i], X[j]) - self.metric(X[i], X[k]))
         return loss
 
     def get_t(self, X):
@@ -266,21 +316,22 @@ class NLMNN():
             # Update the list of imposters
             self.imposters = self.get_imposters(X, y)
             #total_imposters = sum([len(imposters) for imposters in self.imposters.flatten()])
-            #self.num_imposters.append(total_imposters)
+            # self.num_imposters.append(total_imposters)
             #print("\ntotal imposters")
-            #print(total_imposters)
+            # print(total_imposters)
             self.t = self.get_t(X)
 
             # Get gradient
             grad = self.get_grad(X)
+
             #grad = self.get_grad_approx(X, y)
-            #Debugging stuff
+            # Debugging stuff
             print("\nGradient")
             print(grad)
-            print(f"imposters={len([lll for l in self.imposters for ll in l for lll in ll])}")
+            print(f"imposters={np.sum(self.imposters>=0)}")
             self._grad_sizes.append(np.sum(abs(grad)))
             print(np.sum(abs(grad)))
-            #Create copy of A before gradient update
+            # Create copy of A before gradient update
             A_tmp = self.A.copy()
             # Make sure the gradient step isn't too large, leading to divergence
             for i_step in range(self.max_lr_reductions):
@@ -289,9 +340,9 @@ class NLMNN():
                 loss = self.get_loss(X)
 
                 if loss <= best_loss:
-                    if (best_loss-loss) < self.tol:
-                        print("tolerance reached")
-                        return
+                    # if (best_loss-loss) < self.tol:
+                    #    print("tolerance reached")
+                    #    return
                     best_loss = loss
                     self.losses.append(loss)
 
@@ -316,7 +367,7 @@ class NLMNN():
 
 
 if __name__ == '__main__':
-    from sklearn.datasets import load_iris, load_wine
+    from sklearn.datasets import load_iris, load_wine, load_breast_cancer
     from sklearn.neighbors import KNeighborsClassifier
     from sklearn.model_selection import train_test_split
     from mpl_toolkits.mplot3d import Axes3D
@@ -326,17 +377,16 @@ if __name__ == '__main__':
 
     # x1 = np.array([0.5, 0.5]).reshape(2,1) + np.random.randn(2,10)*0.01
     # x2 = np.array([0.5, 0.5]).reshape(2,1) + np.random.randn(2,10)*0.01
-    
+
     # X = np.hstack((x1, x2)).transpose(1,0)
     # #X = np.array([[0,0],[]])
-    iris = load_iris()
+    iris = load_breast_cancer()
     X = iris.data
-    X = X[:,0:3]
-    n,d = X.shape
+    X = X[:, 0:3]
+    n, d = X.shape
     np.random.seed(1)
     #sX = X + np.random.randn(n,d)
-    
-    
+
     # X = np.array([[0,0,1],[0,0.5,0.5],[0,1,0],
     #              [1/3,0,2/3],[1/3,1/3,1/3],[1/3,2/3,0],
     #              [2/5,0,3/5],[2/5,1/5,2/5],[2/5,3/5,0]])
@@ -345,23 +395,22 @@ if __name__ == '__main__':
     X = X/np.sum(X, axis=1, keepdims=True)
     #y = np.array([0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1])
     # y = np.array([0,0,0,1,1,1,2,2,2])
-    y = iris.target
-    
-    #plt.show()
-    
+    y = iris.target  # [:50]
+
+    # plt.show()
 
     #pca = PCA()
-    #pca.fit(X)
+    # pca.fit(X)
     #X = pca.transform(X)
     # split data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, random_state=2)
+    X_train, X_test, y_train, y_test = train_test_split(X, y,  random_state=2)
 
     # create reference KNN
     C1 = KNeighborsClassifier(n_neighbors=3)
     C1.fit(X_train, y_train)
-    
-    #train NLMNN transformation
-  
+
+    # train NLMNN transformation
+
     nlmnn = NLMNN()
     nlmnn.L = np.eye(3)
     C2 = KNeighborsClassifier(n_neighbors=3, metric=nlmnn.metric)
@@ -371,25 +420,22 @@ if __name__ == '__main__':
 
     C3 = KNeighborsClassifier(n_neighbors=3, metric=nlmnn.metric)
     C3.fit(X_train, y_train)
-    
-    
 
-    X2 = X.dot(nlmnn.L)
+    #X2 = X.dot(nlmnn.L)
     # fig = plt.figure()
     # ax = fig.add_subplot(111, projection='3d')
     # ax.scatter(X2[:,0],X2[:,1],X2[:,2],c=y,marker='x', label='X*L')
     # ax.scatter(X[:,0],X[:,1],X[:,2],c=y,marker='o', label='X')
-    #plt.xlim(0,0.5)
-    #plt.ylim(0,1)
+    # plt.xlim(0,0.5)
+    # plt.ylim(0,1)
     # plt.xlabel('x')
     # plt.ylabel('y')
     # plt.legend()
-    #plt.show()
+    # plt.show()
     print(f"normal    KNN acc={C1.score(X_test, y_test)}")
     print(f"untrained NLMNN  KNN acc={C2.score(X_test, y_test)}")
     print(f"trained   NLMNN  KNN acc={C3.score(X_test, y_test)}")
 
-    
     plt.figure()
     plt.subplot(311)
     plt.plot(nlmnn.losses)
@@ -408,10 +454,7 @@ if __name__ == '__main__':
 
     plt.show()
 
-    
-
-
-    # h = .005 
+    # h = .005
     # cmap_light = ListedColormap(['#FFAAAA', '#AAFFAA', '#AAAAFF'])
     # cmap_bold = ListedColormap(['#FF0000', '#00FF00', '#0000FF'])
 
