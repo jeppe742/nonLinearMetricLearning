@@ -4,23 +4,22 @@ from sklearn.metrics import pairwise_distances
 from tqdm import tqdm
 #from numba import jit
 
+
 def chi2_distance(x_i, x_j):
-    d = x_i.shape
-
-    return 0.5*sum((x_i - x_j)**2)/sum(x_i+x_j)
+    return 0.5*sum(((x_i - x_j)**2)/(x_i+x_j))
 
 
-#@jit(nopython=True)
+# @jit(nopython=True)
 # def dChi2_dA(i, j, p, q, L, t):
 #     d,_ = L.shape
 #     result= ((t[i, j, p] * (X[i, q] - X[j, q]) - t[i, j, p]**2*(X[i, q] + X[j, q])/2))
-    
+
 #     for l in range(d):
 #         result -=(L[l, q] * (t[i, j, l] * (X[i, q] - X[j, q]) - t[i, j, l]**2*(X[i, q] + X[j, q])/2))
-        
+
 #     return L[p, q]*result
 
-#@jit(nopython=True)
+# @jit(nopython=True)
 # def _get_grad(X, t, L, target_neighbours, imposters, mu):
 #     '''
 #     Calculate the gradient for a given iteration
@@ -52,7 +51,7 @@ def chi2_distance(x_i, x_j):
 
 
 class NLMNN():
-    def __init__(self, l=1e-8, mu=1, lr=10, max_iter=2000, tol=1e-9, k=3, max_lr_reductions=50):
+    def __init__(self, l=0, mu=1, lr=100, max_iter=2000, tol=1e-9, k=3, max_lr_reductions=50):
         self.l = l
         self.mu = mu
         self.max_iter = max_iter
@@ -113,7 +112,7 @@ class NLMNN():
         y = y.reshape(-1, 1)
         # Calculate pairwise distance, using our metric
         pairwise_distance = pairwise_distances(X, metric=self.metric)
-        
+
         np.fill_diagonal(pairwise_distance, float("inf"))
 
         imposters = []
@@ -122,8 +121,8 @@ class NLMNN():
             imposters.append([])
             for neighbour_idx, j in enumerate(self.target_neighbours[i]):
                 imposters[i].append([])
-                for k in range(n):    
-                    if pairwise_distance[i,k] <= pairwise_distance[i,j] + self.l and y[i]!=y[k]:
+                for k in range(n):
+                    if pairwise_distance[i, k] <= pairwise_distance[i, j] + self.l and y[i] != y[k]:
                         imposters[i][neighbour_idx].append(k)
 
         return np.array(imposters)
@@ -278,6 +277,7 @@ class NLMNN():
             #Debugging stuff
             print("\nGradient")
             print(grad)
+            print(f"imposters={len([lll for l in self.imposters for ll in l for lll in ll])}")
             self._grad_sizes.append(np.sum(abs(grad)))
             print(np.sum(abs(grad)))
             #Create copy of A before gradient update
@@ -304,8 +304,8 @@ class NLMNN():
                     print("Could not find a learning rate that cause gradient step to improve loss...")
                     return
 
-            print("updated A")
-            print(self.A)
+            #print("updated A")
+            # print(self.A)
             print("updated L")
             print(self.L)
             print(f"updated loss = {loss}")
@@ -354,9 +354,9 @@ if __name__ == '__main__':
     #pca.fit(X)
     #X = pca.transform(X)
     # split data
-    X_train, X_test, y_train, y_test = train_test_split(X,y,stratify=y, random_state=2)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, random_state=2)
 
-    #create reference KNN
+    # create reference KNN
     C1 = KNeighborsClassifier(n_neighbors=3)
     C1.fit(X_train, y_train)
     
@@ -413,8 +413,8 @@ if __name__ == '__main__':
 
     # h = .005 
     # cmap_light = ListedColormap(['#FFAAAA', '#AAFFAA', '#AAAAFF'])
-    # cmap_bold = ListedColormap(['#FF0000', '#00FF00', '#0000FF'])   
-    
+    # cmap_bold = ListedColormap(['#FF0000', '#00FF00', '#0000FF'])
+
     # # Plot the decision boundary. For that, we will assign a color to each
     # # point in the mesh [x_min, x_max]x[y_min, y_max].
     # x_min, x_max = X_test[:, 0].min() - 1, X_test[:, 0].max() + 1
@@ -434,8 +434,6 @@ if __name__ == '__main__':
     # plt.xlim(xx.min(), xx.max())
     # plt.ylim(yy.min(), yy.max())
 
-
-
     # Z = C2.predict(np.c_[xx.ravel(), yy.ravel()])
 
     # # Put the result into a color plot
@@ -450,5 +448,3 @@ if __name__ == '__main__':
     # plt.ylim(yy.min(), yy.max())
 
     # plt.show()
-
-    
