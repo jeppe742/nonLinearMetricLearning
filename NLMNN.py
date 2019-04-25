@@ -9,8 +9,8 @@ def chi2_distance(x_i, x_j):
     return 0.5*sum(((x_i - x_j)**2)/(x_i+x_j+1e-18))
 
 
-@jit(nopython=True)
-def dChi2_dA(i, j, p, q, L, t):
+@njit()
+def dChi2_dA(i, j, p, q, L, t, X):
     d, _ = L.shape
     result = ((t[i, j, p] * (X[i, q] - X[j, q]) - t[i, j, p]**2*(X[i, q] + X[j, q])/2))
 
@@ -20,7 +20,7 @@ def dChi2_dA(i, j, p, q, L, t):
     return L[p, q]*result
 
 
-@jit(nopython=True)
+@njit(parallel=True)
 def _metric(x, y, L):
     x = x.dot(L)
     y = y.dot(L)
@@ -28,11 +28,9 @@ def _metric(x, y, L):
     for i in range(len(x)):
         tmp += ((x[i] - y[i])**2)/(x[i] + y[i] + 1e-18)
     return 0.5*tmp
-    #dist = _chi2_distance(x.dot(L), y.dot(L))
-    # return dist
 
 
-@njit()
+@njit(parallel=True)
 def _get_grad(X, t, L, target_neighbours, imposters, mu):
     '''
     Calculate the gradient for a given iteration
@@ -46,22 +44,23 @@ def _get_grad(X, t, L, target_neighbours, imposters, mu):
 
     grad = np.zeros((d, d))
 
-    for p in range(d):
+    for p in prange(d):
         for q in range(d):
 
             for i in range(n):
                 for imp, j in enumerate(target_neighbours[i]):
                     # Pull step
-                    grad[p, q] += dChi2_dA(i, j, p, q, L, t)
+                    tmp = dChi2_dA(i, j, p, q, L, t, X)
+                    grad[p, q] += tmp
 
                     # Push step
                     for k in imposters[i, imp]:
                         if k >= 0:
-                            grad[p, q] += mu * (dChi2_dA(i, j, p, q, L, t) - dChi2_dA(i, k, p, q, L, t))
+                            grad[p, q] += mu * (tmp - dChi2_dA(i, k, p, q, L, t, X))
     return grad
 
 
-@njit()
+@njit(parallel=True)
 def _get_loss(X, target_neighbours, imposters, L, mu, l):
     '''
     Calculate the loss, given the current L matrix
@@ -72,19 +71,23 @@ def _get_loss(X, target_neighbours, imposters, L, mu, l):
         loss (float): Loss value
     '''
     n, d = X.shape
-    loss = 0
-    for i in range(n):
+
+    #Allocate loss as a numpy array, which is needed for the jit to parallize the loop apparently
+    loss = np.zeros((n))
+    for i in prange(n):
         for imp, j in enumerate(target_neighbours[i]):
-            loss += _metric(X[i], X[j], L)
+
+            tmp = _metric(X[i], X[j], L)
+            loss[i] += tmp
 
             for k in imposters[i, imp]:
                 if k >= 0:
-                    loss += mu * (l + _metric(X[i], X[j], L) - _metric(X[i], X[k], L))
-    return loss
+                    loss[i] += mu * (l + tmp - _metric(X[i], X[k], L))
+    return loss.sum()
 
 
 class NLMNN():
-    def __init__(self, l=0.1, mu=1, lr=1, max_iter=200, tol=1e-9, k=3, max_lr_reductions=50, jit=True):
+    def __init__(self, l=0.01, mu=1, lr=1, max_iter=200, tol=1e-9, k=3, max_lr_reductions=50, jit=True):
         self.l = l
         self.mu = mu
         self.max_iter = max_iter
@@ -145,7 +148,7 @@ class NLMNN():
         # make sure the second dim is expanded
         y = y.reshape(-1, 1)
         # Calculate pairwise distance, using our metric
-        pairwise_distance = pairwise_distances(X, metric=self.metric)
+        pairwise_distance = pairwise_distances(X, metric=lambda X,y: _metric(X,y,self.L))
 
         np.fill_diagonal(pairwise_distance, float("inf"))
 
@@ -160,8 +163,8 @@ class NLMNN():
                         imposters[i][neighbour_idx].append(k)
 
         # Convert to padded numpy array. This might use unnessecary memory for large datasets
-        max_num_imposters = len(max(max(imposters, key=len), key=len))
-
+        #max_num_imposters = len(max(max(imposters, key=len), key=len)) +1
+        max_num_imposters = len(max([max(ll, key=len) for ll in imposters], key=len))
         imposters_np = np.ones((n, self.k, max_num_imposters), dtype=np.int)*-1
 
         for i in range(n):
@@ -310,13 +313,12 @@ class NLMNN():
         self.L = self.calculate_L()
         # Find the target neighbours
         self.target_neighbours = self.get_target_neighbours(X, y)
-
+        self.imposters = self.get_imposters(X, y)
         best_loss = float("inf")
         for i in tqdm(range(self.max_iter)):
-            # Update the list of imposters
-            self.imposters = self.get_imposters(X, y)
+            
             #total_imposters = sum([len(imposters) for imposters in self.imposters.flatten()])
-            # self.num_imposters.append(total_imposters)
+            #self.num_imposters.append(total_imposters)
             #print("\ntotal imposters")
             # print(total_imposters)
             self.t = self.get_t(X)
@@ -328,7 +330,9 @@ class NLMNN():
             # Debugging stuff
             print("\nGradient")
             print(grad)
-            print(f"imposters={np.sum(self.imposters>=0)}")
+            total_imposters = np.sum(self.imposters>=0)
+            print(f"imposters={total_imposters}")
+            self.num_imposters.append(total_imposters)
             self._grad_sizes.append(np.sum(abs(grad)))
             print(np.sum(abs(grad)))
             # Create copy of A before gradient update
@@ -337,6 +341,8 @@ class NLMNN():
             for i_step in range(self.max_lr_reductions):
                 self.A = A_tmp - self.lr*grad
                 self.L = self.calculate_L()
+                # Update the list of imposters
+                self.imposters = self.get_imposters(X, y)
                 loss = self.get_loss(X)
 
                 if loss <= best_loss:
@@ -380,6 +386,7 @@ if __name__ == '__main__':
 
     # X = np.hstack((x1, x2)).transpose(1,0)
     # #X = np.array([[0,0],[]])
+    #iris = load_iris()
     iris = load_breast_cancer()
     X = iris.data
     X = X[:, 0:3]
@@ -412,14 +419,40 @@ if __name__ == '__main__':
     # train NLMNN transformation
 
     nlmnn = NLMNN()
-    nlmnn.L = np.eye(3)
+    nlmnn.L = np.eye(d)
     C2 = KNeighborsClassifier(n_neighbors=3, metric=nlmnn.metric)
     C2.fit(X_train, y_train)
 
-    nlmnn.fit(X, y)
+    A= np.random.rand(d,d)
+    #A = np.eye(d)
+    nlmnn2 = NLMNN()
+    nlmnn2.fit(X, y, A_init=A)
 
-    C3 = KNeighborsClassifier(n_neighbors=3, metric=nlmnn.metric)
+    C3 = KNeighborsClassifier(n_neighbors=3, metric=nlmnn2.metric)
     C3.fit(X_train, y_train)
+
+    print(f"normal    KNN acc={C1.score(X_test, y_test)}")
+    print(f"untrained NLMNN  KNN acc={C2.score(X_test, y_test)}")
+    print(f"trained   NLMNN  KNN acc={C3.score(X_test, y_test)}")
+
+    plt.figure()
+    plt.subplot(311)
+    plt.plot(nlmnn2.losses)
+    plt.ylabel('Loss')
+    plt.xlabel('Iterations')
+
+    plt.subplot(312)
+    plt.plot(nlmnn2._grad_sizes)
+    plt.ylabel('L1 norm of gradient')
+    plt.xlabel('Iterations')
+
+    plt.subplot(313)
+    plt.plot(nlmnn2.num_imposters)
+    plt.ylabel('Number of imposters')
+    plt.xlabel('Iterations')
+
+    plt.show()
+
 
     #X2 = X.dot(nlmnn.L)
     # fig = plt.figure()
@@ -432,27 +465,6 @@ if __name__ == '__main__':
     # plt.ylabel('y')
     # plt.legend()
     # plt.show()
-    print(f"normal    KNN acc={C1.score(X_test, y_test)}")
-    print(f"untrained NLMNN  KNN acc={C2.score(X_test, y_test)}")
-    print(f"trained   NLMNN  KNN acc={C3.score(X_test, y_test)}")
-
-    plt.figure()
-    plt.subplot(311)
-    plt.plot(nlmnn.losses)
-    plt.ylabel('Loss')
-    plt.xlabel('Iterations')
-
-    plt.subplot(312)
-    plt.plot(nlmnn._grad_sizes)
-    plt.ylabel('L1 norm of gradient')
-    plt.xlabel('Iterations')
-
-    plt.subplot(313)
-    plt.plot(nlmnn.num_imposters)
-    plt.ylabel('Number of imposters')
-    plt.xlabel('Iterations')
-
-    plt.show()
 
     # h = .005
     # cmap_light = ListedColormap(['#FFAAAA', '#AAFFAA', '#AAAAFF'])
