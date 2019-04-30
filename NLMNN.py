@@ -87,7 +87,7 @@ def _get_loss(X, target_neighbours, imposters, L, mu, l):
 
 
 class NLMNN():
-    def __init__(self, l=0.01, mu=1, lr=1, max_iter=200, tol=1e-9, k=3, max_lr_reductions=50, jit=True):
+    def __init__(self, l=0.01, mu=1, lr=1, max_iter=200, tol=1e-9, k=3, auto_step_size=False, max_lr_reductions=50, jit=True):
         self.l = l
         self.mu = mu
         self.max_iter = max_iter
@@ -97,6 +97,7 @@ class NLMNN():
         self._grad_sizes = []
         self.losses = []
         self.num_imposters = []
+        self.auto_step_size = auto_step_size
         self.max_lr_reductions = max_lr_reductions
         self.jit = jit
 
@@ -300,7 +301,7 @@ class NLMNN():
     def calculate_L(self):
         return softmax(self.A, axis=0)
 
-    def fit(self, X, y, A_init=None):
+    def fit(self, X, y, A_init=None, verbose=False):
         n, d = X.shape
 
         # Initialize the A matrix if not specified
@@ -311,66 +312,99 @@ class NLMNN():
 
         # Update L from A
         self.L = self.calculate_L()
+        self.t = self.get_t(X)
         # Find the target neighbours
         self.target_neighbours = self.get_target_neighbours(X, y)
         self.imposters = self.get_imposters(X, y)
+        total_imposters = np.sum(self.imposters>=0)
+        print(f"imposters={total_imposters}")
         best_loss = float("inf")
         for i in tqdm(range(self.max_iter)):
-            
-            #total_imposters = sum([len(imposters) for imposters in self.imposters.flatten()])
-            #self.num_imposters.append(total_imposters)
-            #print("\ntotal imposters")
-            # print(total_imposters)
-            self.t = self.get_t(X)
 
             # Get gradient
             grad = self.get_grad(X)
 
-            #grad = self.get_grad_approx(X, y)
-            # Debugging stuff
-            print("\nGradient")
-            print(grad)
             total_imposters = np.sum(self.imposters>=0)
-            print(f"imposters={total_imposters}")
             self.num_imposters.append(total_imposters)
-            self._grad_sizes.append(np.sum(abs(grad)))
-            print(np.sum(abs(grad)))
-            # Create copy of A before gradient update
-            A_tmp = self.A.copy()
-            # Make sure the gradient step isn't too large, leading to divergence
-            for i_step in range(self.max_lr_reductions):
-                self.A = A_tmp - self.lr*grad
+            grad_size = np.sum(abs(grad))
+            self._grad_sizes.append(grad_size)
+            if verbose:
+                    
+                print("\nGradient")
+                print(grad)
+                print(f"Gradient size = {grad_size}")
+                print(f"imposters={total_imposters}")
+            
+            
+            if self.auto_step_size:
+                # Create copy of A before gradient update
+                A_tmp = self.A.copy()
+                # Make sure the gradient step isn't too large, leading to divergence
+                for i_step in range(self.max_lr_reductions):
+                    self.A = A_tmp - self.lr*grad
+                    self.L = self.calculate_L()
+                    # Update the list of imposters
+                    self.imposters = self.get_imposters(X, y)
+                    loss = self.get_loss(X)
+
+                    if loss <= best_loss:
+                        if (best_loss-loss) < self.tol:
+                            print("tolerance reached")
+                            return
+                        best_loss = loss
+                        self.losses.append(loss)
+
+                        break
+
+                    else:
+                        print(f"Gradient step too large, halfing learning rate   lr={self.lr:.2E}     loss = {loss}")
+                        self.lr /= 2
+                    if i_step == (self.max_lr_reductions-1):
+                        print("Could not find a learning rate that cause gradient step to improve loss...")
+                        return
+            else:
+                #Update A and all dependent variables
+                self.A = self.A - self.lr*grad
                 self.L = self.calculate_L()
-                # Update the list of imposters
-                self.imposters = self.get_imposters(X, y)
+                self.t = self.get_t(X)
+                self.imposters = self.get_imposters(X,y)
                 loss = self.get_loss(X)
+                self.losses.append(loss)
 
-                if loss <= best_loss:
-                    # if (best_loss-loss) < self.tol:
-                    #    print("tolerance reached")
-                    #    return
-                    best_loss = loss
-                    self.losses.append(loss)
-
-                    break
-
-                else:
-                    print(f"Gradient step too large, halfing learning rate   lr={self.lr:.2E}     loss = {loss}")
-                    self.lr /= 2
-                if i_step == (self.max_lr_reductions-1):
-                    print("Could not find a learning rate that cause gradient step to improve loss...")
-                    return
-
-            #print("updated A")
-            # print(self.A)
-            print("updated L")
-            print(self.L)
-            print(f"updated loss = {loss}")
+            if verbose:
+                print("updated L")
+                print(self.L)
+                print(f"updated loss = {loss}")
 
     def metric(self, x, y):
         dist = chi2_distance(x.dot(self.L), y.dot(self.L))
         return dist
 
+    def plot_debug(self):
+        import matplotlib.pyplot as plt
+        print(f"loss = {self.losses[-1]}")
+        print(f"number of imposters = {self.num_imposters[-1]}")
+        plt.figure()
+        plt.subplot(221)
+        plt.plot(self.losses)
+        plt.ylabel('Loss')
+        plt.xlabel('Iterations')
+
+        plt.subplot(222)
+        plt.plot(self._grad_sizes)
+        plt.ylabel('L1 norm of gradient')
+        plt.xlabel('Iterations')
+
+        plt.subplot(223)
+        plt.plot(self.num_imposters)
+        plt.ylabel('Number of imposters')
+        plt.xlabel('Iterations')
+
+        plt.subplot(224)
+        plt.imshow(self.L)
+        plt.colorbar()
+        plt.show()
+    
 
 if __name__ == '__main__':
     from sklearn.datasets import load_iris, load_wine, load_breast_cancer
@@ -380,6 +414,7 @@ if __name__ == '__main__':
     from sklearn.decomposition import PCA
     import matplotlib.pyplot as plt
     from matplotlib.colors import ListedColormap
+    from metric_learn import LMNN
 
     # x1 = np.array([0.5, 0.5]).reshape(2,1) + np.random.randn(2,10)*0.01
     # x2 = np.array([0.5, 0.5]).reshape(2,1) + np.random.randn(2,10)*0.01
@@ -387,9 +422,9 @@ if __name__ == '__main__':
     # X = np.hstack((x1, x2)).transpose(1,0)
     # #X = np.array([[0,0],[]])
     #iris = load_iris()
-    iris = load_breast_cancer()
+    iris = load_wine()
     X = iris.data
-    X = X[:, 0:3]
+    X = X#[:, 0:7]
     n, d = X.shape
     np.random.seed(1)
     #sX = X + np.random.randn(n,d)
@@ -410,49 +445,48 @@ if __name__ == '__main__':
     # pca.fit(X)
     #X = pca.transform(X)
     # split data
-    X_train, X_test, y_train, y_test = train_test_split(X, y,  random_state=2)
+    X_train, X_test, y_train, y_test = train_test_split(X, y)
 
     # create reference KNN
     C1 = KNeighborsClassifier(n_neighbors=3)
     C1.fit(X_train, y_train)
 
+    C2 = KNeighborsClassifier(n_neighbors=3, metric='mahalanobis',
+                          metric_params=dict(VI=np.eye(d)))
+    C2.fit(X_train, y_train)
+
+    lmnn = LMNN(k=3, max_iter=10000)
+    lmnn.fit(X_train, y_train)
+    C3 = KNeighborsClassifier(n_neighbors=3, metric='mahalanobis',
+                          metric_params=dict(VI=lmnn.metric()))
+    C3.fit(X_train, y_train)
     # train NLMNN transformation
 
     nlmnn = NLMNN()
     nlmnn.L = np.eye(d)
-    C2 = KNeighborsClassifier(n_neighbors=3, metric=nlmnn.metric)
-    C2.fit(X_train, y_train)
+    C4 = KNeighborsClassifier(n_neighbors=3, metric=nlmnn.metric)
+    C4.fit(X_train, y_train)
+    
 
     A= np.random.rand(d,d)
+    A = np.ones((d,d))+ np.random.rand(d,d)*0.01
     #A = np.eye(d)
     nlmnn2 = NLMNN()
-    nlmnn2.fit(X, y, A_init=A)
+    nlmnn2.fit(X_train, y_train, A_init=A)
 
-    C3 = KNeighborsClassifier(n_neighbors=3, metric=nlmnn2.metric)
-    C3.fit(X_train, y_train)
+    C5 = KNeighborsClassifier(n_neighbors=3, metric=nlmnn2.metric)
+    C5.fit(X_train, y_train)
 
-    print(f"normal    KNN acc={C1.score(X_test, y_test)}")
-    print(f"untrained NLMNN  KNN acc={C2.score(X_test, y_test)}")
-    print(f"trained   NLMNN  KNN acc={C3.score(X_test, y_test)}")
+    
 
-    plt.figure()
-    plt.subplot(311)
-    plt.plot(nlmnn2.losses)
-    plt.ylabel('Loss')
-    plt.xlabel('Iterations')
-
-    plt.subplot(312)
-    plt.plot(nlmnn2._grad_sizes)
-    plt.ylabel('L1 norm of gradient')
-    plt.xlabel('Iterations')
-
-    plt.subplot(313)
-    plt.plot(nlmnn2.num_imposters)
-    plt.ylabel('Number of imposters')
-    plt.xlabel('Iterations')
-
-    plt.show()
-
+    print(f"normal           KNN train acc={C1.score(X_train, y_train):.3f},  test acc={C1.score(X_test, y_test)}")
+    print(f"untrained LMNN   KNN train acc={C2.score(X_train, y_train):.3f},  test acc={C2.score(X_test, y_test)}")
+    print(f"LMNN             KNN train acc={C3.score(X_train, y_train):.3f},  test acc={C3.score(X_test, y_test)}")
+    print(f"untrained NLMNN  KNN train acc={C4.score(X_train, y_train):.3f},  test acc={C4.score(X_test, y_test)}")
+    print(f"trained   NLMNN  KNN train acc={C5.score(X_train, y_train):.3f},  test acc={C5.score(X_test, y_test)}")
+    
+   
+    nlmnn2.plot_debug()
 
     #X2 = X.dot(nlmnn.L)
     # fig = plt.figure()
