@@ -261,8 +261,6 @@ class NLMNN():
         if self.jit:
             
             grad = _get_grad(X, t, self.L, self.target_neighbours, self.imposters, self.mu, self.r, self.use_softmax)
-            print(grad)
-            print(_get_grad(X, t, self.L, self.target_neighbours, self.imposters, self.mu, self.r, False))
             return grad
 
         # Define partial derivative function for chainrule calculation
@@ -363,7 +361,7 @@ class NLMNN():
 
         self.imposters = self.get_imposters(X, y)
         total_imposters = np.sum(self.imposters>=0)
-        #print(f"imposters={total_imposters}")
+
         best_loss = float("inf")
         for i in tqdm(range(self.max_iter),disable=(not use_tqdm)):
 
