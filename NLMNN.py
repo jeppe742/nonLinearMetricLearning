@@ -183,7 +183,7 @@ class NLMNN():
         # make sure the second dim is expanded
         y = y.reshape(-1, 1)
         # Calculate pairwise distance, using our metric
-        pairwise_distance = pairwise_distances(X, metric=lambda X,y: _metric(X,y,self.L), n_jobs=1)
+        pairwise_distance = pairwise_distances(X, metric=lambda X,y: _metric(X,y,self.L), n_jobs=-1)
 
         np.fill_diagonal(pairwise_distance, float("inf"))
 
